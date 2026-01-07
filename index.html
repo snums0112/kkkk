@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>이중슬릿 프라운호퍼 검증 (mm/px 캘리브레이션 포함)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 18px; color: #111; }
+    .row { display: flex; gap: 18px; flex-wrap: wrap; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; min-width: 340px; flex: 1; }
+    h2 { margin: 0 0 10px 0; font-size: 18px; }
+    label { display: inline-block; margin: 6px 0 4px; }
+    input[type="number"], select { width: 220px; padding: 6px; }
+    input[type="file"] { margin: 6px 0 10px; }
+    button { padding: 8px 10px; margin: 6px 6px 6px 0; cursor: pointer; }
+    canvas { width: 100%; border: 1px solid #ccc; border-radius: 8px; background: #fafafa; }
+    .small { font-size: 13px; color: #444; line-height: 1.45; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; white-space: pre-wrap; }
+    .out { margin-top: 10px; padding: 10px; background: #f6f8ff; border: 1px solid #dde3ff; border-radius: 8px; }
+    .warn { margin-top: 10px; padding: 10px; background: #fff7e6; border: 1px solid #ffe1a6; border-radius: 8px; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid #ddd; background:#fafafa; }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <h2>실험 파라미터</h2>
+    <div class="row">
+      <div>
+        <label>파장 λ (nm)</label><br/>
+        <input id="lambdaNm" type="number" value="520" step="1" min="1" />
+      </div>
+      <div>
+        <label>슬릿-스크린 거리 L (cm)</label><br/>
+        <input id="Lcm" type="number" value="17" step="0.1" min="0" />
+      </div>
+      <div>
+        <label>슬릿 간격 d (cm)</label><br/>
+        <input id="dcm" type="number" value="0.1" step="0.001" min="0" />
+      </div>
+    </div>
+
+    <div class="small warn">
+      브라우저는 DNG/RAW를 직접 디코딩하지 못하는 경우가 많다. 간섭무늬 사진은 PNG/JPG/TIFF로 변환해 업로드하는 것을 권장한다.
+      Δy(피크 위치/간격)는 감마/색보정 영향이 비교적 작지만, 과포화(클리핑)·자동노출 변화·과한 샤픈/NR은 피크 검출을 망가뜨릴 수 있다.
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <h2>간섭무늬 분석 <span id="modeBadge" class="badge">모드: 대기</span></h2>
+      <input id="fringeFile" type="file" accept="image/*" />
+
+      <div class="small">
+        1) 스케일(mm/px): 사진 안에 자/눈금이 같이 보이게 찍고, “스케일 캘리브레이션 2점”으로 기준 길이 양 끝을 클릭한다.<br/>
+        2) 프로파일 선분: “프로파일 선분 2점”으로 줄무늬에 수직 방향 선분을 클릭한다.<br/>
+        이후 (A) Δy_direct, (B) y_m vs m 선형회귀(Δy_reg) 모두를 프라운호퍼 예측과 비교해 오차를 출력한다.
+      </div>
+
+      <div style="margin-top:8px;">
+        <button id="modeCalib">스케일 캘리브레이션 2점</button>
+        <button id="modeProfile">프로파일 선분 2점</button>
+        <button id="resetAll">리셋</button>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>기준 길이 (mm) (캘리브레이션용)</label><br/>
+          <input id="knownLenMm" type="number" value="50" step="0.1" min="0" />
+        </div>
+        <div>
+          <label>스크린 스케일 (mm/px)</label><br/>
+          <input id="screenMmPerPx" type="number" value="" step="0.000001" min="0" placeholder="캘리브레이션으로 자동 계산" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>채널</label><br/>
+          <select id="channel">
+            <option value="luma">밝기(Luma)</option>
+            <option value="r">R</option>
+            <option value="g">G</option>
+            <option value="b">B</option>
+            <option value="sum">R+G+B</option>
+          </select>
+        </div>
+        <div>
+          <label>감마 보정 가정</label><br/>
+          <select id="gammaMode">
+            <option value="linear">선형(이미지=선형 가정)</option>
+            <option value="srgb">sRGB(대략 γ=2.2 역보정)</option>
+          </select>
+        </div>
+        <div>
+          <label>샘플 수</label><br/>
+          <input id="nSamples" type="number" value="2200" step="100" min="200" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>스트립 폭(px)</label><br/>
+          <input id="stripWidth" type="number" value="7" step="1" min="1" />
+        </div>
+        <div>
+          <label>스무딩 창(홀수 권장)</label><br/>
+          <input id="smoothWin" type="number" value="11" step="2" min="1" />
+        </div>
+        <div>
+          <label>피크 최소 간격(샘플)</label><br/>
+          <input id="minPeakDist" type="number" value="30" step="1" min="1" />
+        </div>
+        <div>
+          <label>피크 임계(0~1)</label><br/>
+          <input id="peakThr" type="number" value="0.55" step="0.01" min="0" max="1" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>회귀에 사용할 피크 개수(중앙 기준)</label><br/>
+          <input id="regUseK" type="number" value="13" step="2" min="3" />
+        </div>
+      </div>
+
+      <canvas id="fringeCanvas" width="900" height="520"></canvas>
+      <canvas id="plotCanvas" width="900" height="220" style="margin-top:10px;"></canvas>
+
+      <div style="margin-top:8px;">
+        <button id="compute">계산(Δy 직접 + 회귀 + 오차)</button>
+      </div>
+
+      <div id="statusOut" class="out mono">상태: 대기</div>
+      <div id="compareOut" class="out mono">비교 결과가 아직 없다.</div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ---------- Utilities ----------
+  function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+  function dist(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return Math.hypot(dx,dy); }
+
+  function movingAverage(arr, win){
+    win = Math.max(1, Math.floor(win));
+    if (win % 2 === 0) win += 1;
+    const half = Math.floor(win/2);
+    const out = new Array(arr.length).fill(0);
+    const prefix = new Array(arr.length+1).fill(0);
+    for(let i=0;i<arr.length;i++) prefix[i+1]=prefix[i]+arr[i];
+    for(let i=0;i<arr.length;i++){
+      const l = Math.max(0, i-half);
+      const r = Math.min(arr.length-1, i+half);
+      out[i] = (prefix[r+1]-prefix[l]) / (r-l+1);
+    }
+    return out;
+  }
+
+  function findPeaks(y, minDist, thr01){
+    const n = y.length;
+    if(n < 3) return [];
+    let ymin=Infinity, ymax=-Infinity;
+    for(const v of y){ ymin=Math.min(ymin,v); ymax=Math.max(ymax,v); }
+    const denom = (ymax - ymin) || 1;
+    const yn = y.map(v => (v - ymin)/denom);
+
+    const candidates = [];
+    for(let i=1;i<n-1;i++){
+      if(yn[i] > yn[i-1] && yn[i] > yn[i+1] && yn[i] >= thr01){
+        candidates.push(i);
+      }
+    }
+    candidates.sort((i,j) => yn[j]-yn[i]); // higher peaks first
+
+    const kept = [];
+    const blocked = new Array(n).fill(false);
+    for(const idx of candidates){
+      if(blocked[idx]) continue;
+      kept.push(idx);
+      const l = Math.max(0, idx - minDist);
+      const r = Math.min(n-1, idx + minDist);
+      for(let k=l;k<=r;k++) blocked[k]=true;
+    }
+    kept.sort((a,b)=>a-b);
+    return kept;
+  }
+
+  function drawPlot(canvas, y, peaks){
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0,0,W,H);
+    ctx.strokeStyle = '#cfcfcf';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5,0.5,W-1,H-1);
+
+    if(!y || y.length < 2) return;
+
+    let ymin=Infinity, ymax=-Infinity;
+    for(const v of y){ ymin=Math.min(ymin,v); ymax=Math.max(ymax,v); }
+    if(ymax === ymin){ ymax = ymin + 1; }
+
+    const mL=30, mR=10, mT=10, mB=18;
+    const pw = W - mL - mR;
+    const ph = H - mT - mB;
+
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for(let i=0;i<y.length;i++){
+      const x = mL + (i/(y.length-1))*pw;
+      const yy = mT + (1-(y[i]-ymin)/(ymax-ymin))*ph;
+      if(i===0) ctx.moveTo(x,yy);
+      else ctx.lineTo(x,yy);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = '#d10000';
+    for(const p of (peaks||[])){
+      const x = mL + (p/(y.length-1))*pw;
+      const yy = mT + (1-(y[p]-ymin)/(ymax-ymin))*ph;
+      ctx.beginPath();
+      ctx.arc(x, yy, 3, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = '#333';
+    ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    ctx.fillText('Intensity', 6, 14);
+    ctx.fillText('index', W-45, H-6);
+  }
+
+  function linreg(x, y){
+    const n = x.length;
+    if(n < 2) return null;
+    let sx=0, sy=0, sxx=0, sxy=0;
+    for(let i=0;i<n;i++){
+      sx += x[i];
+      sy += y[i];
+      sxx += x[i]*x[i];
+      sxy += x[i]*y[i];
+    }
+    const denom = (n*sxx - sx*sx);
+    if(Math.abs(denom) < 1e-12) return null;
+    const b = (n*sxy - sx*sy) / denom;
+    const a = (sy - b*sx) / n;
+
+    let ssTot=0, ssRes=0;
+    const ybar = sy / n;
+    for(let i=0;i<n;i++){
+      const yh = a + b*x[i];
+      ssRes += (y[i]-yh)*(y[i]-yh);
+      ssTot += (y[i]-ybar)*(y[i]-ybar);
+    }
+    const r2 = ssTot > 0 ? (1 - ssRes/ssTot) : 1.0;
+    return {a, b, r2};
+  }
+
+  // ---------- Image state ----------
+  function makeImageState(canvas){
+    const ctx = canvas.getContext('2d');
+    const off = document.createElement('canvas');
+    const offCtx = off.getContext('2d', { willReadFrequently: true });
+    return { canvas, ctx, off, offCtx, img: null, viewScale: 1, viewOffset: {x:0,y:0} };
+  }
+
+  function fitAndDraw(state, overlays){
+    const {canvas, ctx, img, off, offCtx} = state;
+    ctx.clearRect(0,0,canvas.width, canvas.height);
+    if(!img) return;
+
+    off.width = img.naturalWidth;
+    off.height = img.naturalHeight;
+    offCtx.clearRect(0,0,off.width, off.height);
+    offCtx.drawImage(img, 0,0);
+
+    const cw = canvas.width, ch = canvas.height;
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    const s = Math.min(cw/iw, ch/ih);
+    const dw = iw*s, dh = ih*s;
+    const ox = (cw - dw)/2;
+    const oy = (ch - dh)/2;
+
+    state.viewScale = s;
+    state.viewOffset = {x: ox, y: oy};
+
+    ctx.fillStyle = '#fafafa';
+    ctx.fillRect(0,0,cw,ch);
+    ctx.drawImage(img, ox, oy, dw, dh);
+
+    if(!overlays) return;
+
+    const drawOverlay = (ov) => {
+      const pts = ov.points || [];
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = ov.color || '#00a000';
+      ctx.fillStyle = ov.color || '#00a000';
+      for(let i=0;i<pts.length;i++){
+        const p = pts[i];
+        const vx = ox + p.x*s;
+        const vy = oy + p.y*s;
+        ctx.beginPath();
+        ctx.arc(vx,vy,4,0,Math.PI*2);
+        ctx.fill();
+        ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+        ctx.fillText(ov.label ? `${ov.label}${i+1}` : String(i+1), vx+6, vy-6);
+      }
+      if(pts.length === 2){
+        const p0=pts[0], p1=pts[1];
+        ctx.beginPath();
+        ctx.moveTo(ox + p0.x*s, oy + p0.y*s);
+        ctx.lineTo(ox + p1.x*s, oy + p1.y*s);
+        ctx.stroke();
+      }
+    };
+
+    for(const ov of overlays) drawOverlay(ov);
+  }
+
+  function canvasToImageCoord(state, clientX, clientY){
+    const rect = state.canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) * (state.canvas.width / rect.width);
+    const y = (clientY - rect.top) * (state.canvas.height / rect.height);
+    const {x:ox,y:oy} = state.viewOffset;
+    const s = state.viewScale;
+    const ix = (x - ox)/s;
+    const iy = (y - oy)/s;
+    if(!state.img) return null;
+    if(ix < 0 || iy < 0 || ix > state.img.naturalWidth || iy > state.img.naturalHeight) return null;
+    return {x: ix, y: iy};
+  }
+
+  function getPixelRGBA(state, x, y){
+    const {offCtx, off} = state;
+    const xi = Math.floor(clamp(x, 0, off.width-1));
+    const yi = Math.floor(clamp(y, 0, off.height-1));
+    const d = offCtx.getImageData(xi, yi, 1, 1).data;
+    return {r:d[0], g:d[1], b:d[2], a:d[3]};
+  }
+
+  function intensityFromRGBA(rgba, channel, gammaMode){
+    let r = rgba.r/255, g = rgba.g/255, b = rgba.b/255;
+    if(gammaMode === 'srgb'){
+      const lin = (u) => Math.pow(u, 2.2);
+      r = lin(r); g = lin(g); b = lin(b);
+    }
+    if(channel === 'r') return r;
+    if(channel === 'g') return g;
+    if(channel === 'b') return b;
+    if(channel === 'sum') return r+g+b;
+    return 0.2126*r + 0.7152*g + 0.0722*b;
+  }
+
+  function sampleProfileAlongLine(state, p0, p1, nSamples, stripWidthPx, channel, gammaMode){
+    const L = dist(p0,p1);
+    const dx = (p1.x - p0.x) / (nSamples-1);
+    const dy = (p1.y - p0.y) / (nSamples-1);
+
+    let nx = -(p1.y - p0.y);
+    let ny = (p1.x - p0.x);
+    const nlen = Math.hypot(nx,ny) || 1;
+    nx /= nlen; ny /= nlen;
+
+    const half = Math.max(0, Math.floor(stripWidthPx/2));
+    const y = new Array(nSamples).fill(0);
+
+    for(let i=0;i<nSamples;i++){
+      const cx = p0.x + dx*i;
+      const cy = p0.y + dy*i;
+
+      let acc=0, cnt=0;
+      for(let k=-half;k<=half;k++){
+        const sx = cx + nx*k;
+        const sy = cy + ny*k;
+        const rgba = getPixelRGBA(state, sx, sy);
+        acc += intensityFromRGBA(rgba, channel, gammaMode);
+        cnt += 1;
+      }
+      y[i] = acc / cnt;
+    }
+    return { y, lineLengthPx: L };
+  }
+
+  // ---------- DOM ----------
+  const fringeCanvas = document.getElementById('fringeCanvas');
+  const plotCanvas = document.getElementById('plotCanvas');
+  const statusOut = document.getElementById('statusOut');
+  const compareOut = document.getElementById('compareOut');
+  const modeBadge = document.getElementById('modeBadge');
+
+  const fringeState = makeImageState(fringeCanvas);
+
+  // Modes: 'idle' | 'calib' | 'profile'
+  let mode = 'idle';
+
+  // Overlay points
+  let calibPts = [];   // 2 points
+  let profilePts = []; // 2 points
+
+  // Cached results
+  let lastPeaks = null;
+  let deltaPx_direct = null;
+  let lastPxPerSample = null;
+
+  function setStatus(s){ statusOut.textContent = `상태: ${s}`; }
+  function setMode(m){
+    mode = m;
+    const label = (m === 'calib') ? '스케일 캘리브레이션' : (m === 'profile') ? '프로파일 선분' : '대기';
+    modeBadge.textContent = `모드: ${label}`;
+  }
+
+  function redraw(){
+    if(!fringeState.img){
+      const ctx = fringeCanvas.getContext('2d');
+      ctx.clearRect(0,0,fringeCanvas.width, fringeCanvas.height);
+      return;
+    }
+    fitAndDraw(fringeState, [
+      { points: calibPts, color: '#0066cc', label: 'C' },
+      { points: profilePts, color: '#00a000', label: 'P' },
+    ]);
+  }
+
+  function computeScaleIfReady(){
+    if(calibPts.length !== 2) return;
+    const px = dist(calibPts[0], calibPts[1]);
+    const knownMm = parseFloat(document.getElementById('knownLenMm').value);
+    if(!(px > 0) || !(Number.isFinite(knownMm) && knownMm > 0)){
+      setStatus('스케일 계산 실패(기준 길이/점 확인)');
+      return;
+    }
+    const mmPerPx = knownMm / px;
+    document.getElementById('screenMmPerPx').value = mmPerPx;
+    setStatus(`스케일 계산 완료: ${mmPerPx.toExponential(6)} mm/px`);
+  }
+
+  function computeAll(){
+    if(profilePts.length !== 2 || !fringeState.img){
+      compareOut.textContent = "프로파일 선분(2점)이 설정되지 않았거나 이미지가 없다.";
+      return;
+    }
+
+    const screenMmPerPx = parseFloat(document.getElementById('screenMmPerPx').value);
+    const scaleOk = Number.isFinite(screenMmPerPx) && screenMmPerPx > 0;
+
+    const lambdaNm = parseFloat(document.getElementById('lambdaNm').value);
+    const Lcm = parseFloat(document.getElementById('Lcm').value);
+    const dcm = parseFloat(document.getElementById('dcm').value);
+    const theoryOk = Number.isFinite(lambdaNm) && Number.isFinite(Lcm) && Number.isFinite(dcm) && lambdaNm>0 && Lcm>0 && dcm>0;
+
+    const channel = document.getElementById('channel').value;
+    const gammaMode = document.getElementById('gammaMode').value;
+    const nSamples = Math.max(200, parseInt(document.getElementById('nSamples').value || '2200', 10));
+    const stripWidth = Math.max(1, parseInt(document.getElementById('stripWidth').value || '7', 10));
+    const smoothWin = Math.max(1, parseInt(document.getElementById('smoothWin').value || '11', 10));
+    const minPeakDist = Math.max(1, parseInt(document.getElementById('minPeakDist').value || '30', 10));
+    const peakThr = clamp(parseFloat(document.getElementById('peakThr').value || '0.55'), 0, 1);
+    const regUseK = Math.max(3, parseInt(document.getElementById('regUseK').value || '13', 10));
+
+    const {y, lineLengthPx} = sampleProfileAlongLine(fringeState, profilePts[0], profilePts[1], nSamples, stripWidth, channel, gammaMode);
+    const ys = movingAverage(y, smoothWin);
+    const peaks = findPeaks(ys, minPeakDist, peakThr);
+    drawPlot(plotCanvas, ys, peaks);
+
+    if(peaks.length < 2){
+      lastPeaks = peaks;
+      deltaPx_direct = null;
+      compareOut.textContent = [
+        "피크가 2개 미만이라 Δy를 계산할 수 없다.",
+        "피크 임계/스무딩/최소간격을 조절하거나 선분 방향(줄무늬 수직)을 다시 잡아라."
+      ].join('\n');
+      return;
+    }
+
+    lastPxPerSample = lineLengthPx / (nSamples - 1);
+    lastPeaks = peaks;
+
+    // Δy_direct in px: mean adjacent peak spacing
+    let sum=0;
+    for(let i=1;i<peaks.length;i++) sum += (peaks[i]-peaks[i-1]);
+    const meanDiff_samples = sum / (peaks.length-1);
+    deltaPx_direct = meanDiff_samples * lastPxPerSample;
+
+    // Prepare theory
+    const lambda_m = theoryOk ? lambdaNm * 1e-9 : null;
+    const L_m = theoryOk ? Lcm / 100 : null;
+    const d_m = theoryOk ? dcm / 100 : null;
+    const dy_pred_m = theoryOk ? (L_m * lambda_m) / d_m : null;
+
+    // Peak positions along the line (px from line start)
+    const peakPosPx = peaks.map(idx => idx * lastPxPerSample);
+
+    // Choose central peak as nearest to max of ys
+    let idxMax = 0;
+    for(let i=1;i<ys.length;i++) if(ys[i] > ys[idxMax]) idxMax = i;
+    let k0=0, best=Infinity;
+    for(let k=0;k<peaks.length;k++){
+      const d = Math.abs(peaks[k]-idxMax);
+      if(d < best){ best=d; k0=k; }
+    }
+
+    // Regression subset around k0
+    const halfK = Math.floor(regUseK/2);
+    let kL = Math.max(0, k0 - halfK);
+    let kR = Math.min(peaks.length-1, kL + regUseK - 1);
+    kL = Math.max(0, kR - (regUseK - 1));
+
+    const x_m = [];
+    const y_px = [];
+    for(let k=kL;k<=kR;k++){
+      x_m.push(k - k0);
+      y_px.push(peakPosPx[k]);
+    }
+    const reg = linreg(x_m, y_px); // slope b in px/order
+
+    const lines = [];
+
+    if(!scaleOk){
+      lines.push("스크린 스케일(mm/px)이 없어서 물리단위 및 프라운호퍼 오차를 계산할 수 없다.");
+      lines.push("사진에 자/눈금을 같이 찍고, '스케일 캘리브레이션 2점'으로 mm/px를 먼저 구해라.");
+      lines.push("");
+    }
+
+    if(theoryOk){
+      lines.push(`프라운호퍼 예측: Δy_pred ≈ L·λ / d`);
+      lines.push(`  λ=${lambdaNm} nm, L=${Lcm} cm, d=${dcm} cm`);
+      lines.push(`  Δy_pred = ${(dy_pred_m*1000).toFixed(6)} mm`);
+      if(scaleOk){
+        const dy_pred_px = (dy_pred_m*1000) / screenMmPerPx;
+        lines.push(`  (환산) Δy_pred ≈ ${dy_pred_px.toFixed(4)} px`);
+      }
+      lines.push("");
+    } else {
+      lines.push("프라운호퍼 예측 계산 불가: λ, L, d 입력값을 확인.");
+      lines.push("");
+    }
+
+    lines.push(`[A] Δy_direct (피크 간 평균 간격)`);
+    lines.push(`  Δy_direct = ${deltaPx_direct.toFixed(4)} px`);
+    if(scaleOk){
+      const dy_direct_mm = deltaPx_direct * screenMmPerPx;
+      const dy_direct_m = dy_direct_mm / 1000;
+      lines.push(`  Δy_direct = ${dy_direct_mm.toFixed(6)} mm`);
+      if(theoryOk){
+        const absErr_mm = (dy_direct_m - dy_pred_m) * 1000;
+        const relErr = (dy_direct_m - dy_pred_m) / dy_pred_m * 100;
+        lines.push(`  오차(Δy_direct - Δy_pred) = ${absErr_mm.toExponential(6)} mm`);
+        lines.push(`  상대오차 = ${relErr.toFixed(3)} %`);
+        const d_est_cm = ((L_m * lambda_m) / dy_direct_m) * 100;
+        const d_abs_cm = d_est_cm - dcm;
+        const d_rel = (d_est_cm - dcm) / dcm * 100;
+        lines.push(`  d_est = L·λ/Δy_direct = ${d_est_cm.toFixed(6)} cm`);
+        lines.push(`  d 오차(d_est - d) = ${d_abs_cm.toExponential(6)} cm, 상대오차 ${d_rel.toFixed(3)} %`);
+      }
+    }
+    lines.push("");
+
+    lines.push(`[B] Δy_reg (피크 위치 y_m vs m 선형회귀)`);
+    lines.push(`  중앙(m=0) 피크 인덱스: ${k0} / 전체 피크 ${peaks.length}`);
+    lines.push(`  회귀 사용 피크 수: ${x_m.length} (설정 ${regUseK})`);
+    if(reg){
+      lines.push(`  회귀식(픽셀): y ≈ a + b·m`);
+      lines.push(`  b(=Δy_reg) = ${reg.b.toFixed(6)} px/order`);
+      lines.push(`  a = ${reg.a.toFixed(6)} px`);
+      lines.push(`  R² = ${reg.r2.toFixed(6)}`);
+      if(scaleOk){
+        const dy_reg_mm = reg.b * screenMmPerPx;
+        const dy_reg_m = dy_reg_mm / 1000;
+        lines.push(`  Δy_reg = ${dy_reg_mm.toFixed(6)} mm`);
+        if(theoryOk){
+          const absErr_mm = (dy_reg_m - dy_pred_m) * 1000;
+          const relErr = (dy_reg_m - dy_pred_m) / dy_pred_m * 100;
+          lines.push(`  오차(Δy_reg - Δy_pred) = ${absErr_mm.toExponential(6)} mm`);
+          lines.push(`  상대오차 = ${relErr.toFixed(3)} %`);
+          const d_est_cm = ((L_m * lambda_m) / dy_reg_m) * 100;
+          const d_abs_cm = d_est_cm - dcm;
+          const d_rel = (d_est_cm - dcm) / dcm * 100;
+          lines.push(`  d_est,reg = L·λ/Δy_reg = ${d_est_cm.toFixed(6)} cm`);
+          lines.push(`  d 오차(d_est,reg - d) = ${d_abs_cm.toExponential(6)} cm, 상대오차 ${d_rel.toFixed(3)} %`);
+        }
+      }
+      const diff_px = reg.b - deltaPx_direct;
+      const rel_px = diff_px / deltaPx_direct * 100;
+      lines.push(`  (참고) Δy_reg - Δy_direct = ${diff_px.toExponential(6)} px (${rel_px.toFixed(3)} %)`);
+    } else {
+      lines.push("  회귀 실패: 피크 분포가 부족하거나 regUseK 설정이 부적절.");
+    }
+
+    compareOut.textContent = lines.join('\n');
+    setStatus(`계산 완료 (Δy_direct=${deltaPx_direct.toFixed(3)} px, 피크 ${peaks.length}개)`);
+  }
+
+  // ---------- Event handlers ----------
+  document.getElementById('fringeFile').addEventListener('change', (e) => {
+    const f = e.target.files?.[0];
+    if(!f) return;
+
+    const url = URL.createObjectURL(f);
+    const img = new Image();
+    img.onload = () => {
+      fringeState.img = img;
+      calibPts = [];
+      profilePts = [];
+      setMode('idle');
+      redraw();
+      drawPlot(plotCanvas, null, null);
+      compareOut.textContent = "비교 결과가 아직 없다.";
+      setStatus("이미지 로드 완료");
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => setStatus("이미지 로드 실패");
+    img.src = url;
+  });
+
+  document.getElementById('modeCalib').addEventListener('click', () => {
+    setMode('calib');
+    calibPts = [];
+    redraw();
+    setStatus("캘리브레이션: 기준 길이 양 끝을 2점 클릭");
+  });
+
+  document.getElementById('modeProfile').addEventListener('click', () => {
+    setMode('profile');
+    profilePts = [];
+    redraw();
+    setStatus("프로파일: 줄무늬와 수직인 방향으로 2점 클릭");
+  });
+
+  document.getElementById('resetAll').addEventListener('click', () => {
+    setMode('idle');
+    calibPts = [];
+    profilePts = [];
+    redraw();
+    drawPlot(plotCanvas, null, null);
+    compareOut.textContent = "비교 결과가 아직 없다.";
+    setStatus("리셋 완료");
+  });
+
+  fringeCanvas.addEventListener('click', (ev) => {
+    if(!fringeState.img) return;
+
+    const p = canvasToImageCoord(fringeState, ev.clientX, ev.clientY);
+    if(!p) return;
+
+    if(mode === 'calib'){
+      if(calibPts.length >= 2) calibPts = [];
+      calibPts.push(p);
+      redraw();
+      if(calibPts.length === 2){
+        computeScaleIfReady();
+        if(profilePts.length === 2) computeAll();
+      }
+      return;
+    }
+
+    if(mode === 'profile'){
+      if(profilePts.length >= 2) profilePts = [];
+      profilePts.push(p);
+      redraw();
+      if(profilePts.length === 2){
+        computeAll();
+      }
+      return;
+    }
+  });
+
+  document.getElementById('compute').addEventListener('click', () => {
+    computeAll();
+  });
+
+  // Recompute on parameter change if profile exists
+  const recomputeIds = [
+    'screenMmPerPx','knownLenMm',
+    'lambdaNm','Lcm','dcm',
+    'channel','gammaMode','nSamples','stripWidth','smoothWin','minPeakDist','peakThr','regUseK'
+  ];
+  for(const id of recomputeIds){
+    document.getElementById(id).addEventListener('input', () => {
+      if(calibPts.length === 2) computeScaleIfReady();
+      if(profilePts.length === 2) computeAll();
+    });
+  }
+
+  setMode('idle');
+  setStatus("대기");
+})();
+</script>
+</body>
+</html>
